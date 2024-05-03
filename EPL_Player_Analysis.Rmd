@@ -1,0 +1,357 @@
+
+## Data Wrangling
+
+```{r}
+# Load packages
+library(factoextra)
+library(cluster)
+library(tidyverse)
+library(ggplot2)
+library(mclust)
+library(aricode)
+library(GGally)
+library(caret)
+library(glmnet)
+```
+
+```{r}
+# Load data
+epl_data <- read_csv('EPL_20_21.csv')
+
+unique_values <- unique(epl_data$Position)
+
+unique_values
+```
+
+
+```{r}
+# Select variables of interest from the data
+
+epl_interest <- epl_data %>%
+  select(
+    Mins, Goals, Assists, Matches,Position
+  )
+
+#Create a dummy variable that takes on the value of 1 if striker/midfielder otherwise 0
+epl_interest$str_or_no <- ifelse(epl_interest$Position %in% c("MF,FW", "FW", "FW,MF", "FW,DF"), 1, 0)
+```
+
+
+```{r}
+# Let's ensure complete data
+epl_complete <- na.omit(epl_interest)
+```
+
+# More data wrangling
+```{r}
+# Create a numeric version of the data without the categorical variables for KNNS
+epl_numeric <- epl_complete %>%
+  select(-str_or_no, -Position)
+
+# Create a dataframe without position for regression
+epl_complete_ <- epl_complete %>%
+  select(-Position)
+
+```
+
+# Visualization to check for data wrangling
+```{r}
+library(GGally)
+epl_numeric %>%
+  ggpairs()
+
+#SEE HOW THE CATEGORICAL VARIABLE IS DISTRIBUTED
+table(epl_complete$str_or_no)
+```
+
+Based on the visualization, we can see that the data needs to be normalized. However, based on the context, with the understanding that yes variables such as minutes played and matches would have correlation, and how some variables such as goals would be rightly skewed because goals are harder to score, normalization isn't necessary. Normalization is typically performed to standardize the scale of variables and make them comparable, but it may not be required in all cases. The proportion of non-strikers/midfielder is higher than the proportion of strikers/midfielders which may affect our model.
+
+## Visualization
+```{r}
+ggplot(epl_complete, aes(x = Mins, fill = factor(str_or_no))) +
+  geom_bar(position = "fill") +
+  labs(x = "Minutes", y = "Proportion", fill = "Striker/M or No") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(epl_complete, aes(x = Goals, fill = factor(str_or_no))) +
+  geom_bar(position = "fill") +
+  labs(x = "Goals", y = "Proportion", fill = "Striker/M or No") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(epl_complete, aes(x = Assists, fill = factor(str_or_no))) +
+  geom_bar(position = "fill") +
+  labs(x = "Assists", y = "Proportion", fill = "Striker/M or No") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(epl_complete, aes(x = Matches, fill = factor(str_or_no))) +
+  geom_bar(position = "fill") +
+  labs(x = "Matches", y = "Proportion", fill = "Striker/M or No") +
+  theme_minimal()
+```
+
+All of this shows that the proportion of non-strikers/midfielder is higher as variables increase except for goals and assists as the purpose of a striker/midfielder is to score goals and give assists.
+
+## DIMENSION REDUCTION
+```{r}
+# Elbow Method
+within_sums <- sapply( # converts output to vector
+  1:15, # 1 to number of clusters,
+  FUN = function(centers){
+    
+    kmeans(
+      x = epl_numeric ,
+      centers = centers,
+      iter.max = 10,
+      nstart = 25
+    )$tot.withinss
+    
+  }
+)
+
+# Plot "elbow" method
+fviz_nbclust(
+  x = epl_numeric,
+  FUNcluster = kmeans, # cluster function
+  method = "wss", # within-cluster sum of squares
+  k.max = 15,  # maximum number of clusters
+  iter.max = 10, # same as our k-means setup
+  nstart = 25 # same as our k-means setup
+)
+```
+
+We need to check the elbow of the graph. The elbow is at 2 as shown by the visualization and this would be used to get the number of clusters.
+
+```{r}
+# Silhouette Method
+
+set.seed(1234)
+
+silhouettes <- sapply(
+  2:15, # 2 to number of clusters
+  # Needs minimum 2
+  FUN = function(centers){
+    
+    # Obtain k-means output
+    output <- kmeans(
+      x = epl_numeric,
+      centers = centers,
+      iter.max = 10,
+      nstart = 25
+    )
+    
+    # Compute silhouettes
+    silhos <- silhouette(
+      output$cluster,
+      dist(epl_numeric)
+      # computes Euclidean's distance by default
+    )
+    
+    # Obtain average width
+    mean(silhos[,3], na.rm = TRUE)
+    
+  }
+)
+
+# Plot silhouette method
+fviz_nbclust(
+  x = epl_numeric,
+  FUNcluster = kmeans, # cluster function
+  method = "silhouette", # silhouette
+  k.max = 15,  # maximum number of clusters
+  iter.max = 10, # same as our k-means setup
+  nstart = 25 # same as our k-means setup
+)
+```
+
+This also gives us 2 clusters as being ideal.
+
+```{r}
+# Gap Statistic
+## Set seed
+set.seed(1234)
+
+## Perform bootstrap
+kmeans_gap <- clusGap(
+  x = epl_numeric,
+  FUNcluster = kmeans,
+  iter.max = 10, # same as our k-means setup
+  nstart = 25, # same as our k-means setup
+  K.max = 15, # maximum number of clusters
+  B = 100 # takes some time...
+)
+
+# Plot gap statistic
+fviz_gap_stat(kmeans_gap)
+```
+
+This, on the other hand, gives us 3 clusters as being ideal.
+
+# Let's go with 2 clusters first
+```{r}
+# Set seed
+set.seed(1234)
+
+# Perform k-means with 2 clusters
+unsupervised_run <- kmeans(
+  x = epl_numeric,
+  centers = 2,
+  iter.max = 10,
+  nstart = 25
+)
+```
+
+```{r}
+# Within-cluster sum of squares
+unsupervised_run$withinss
+
+# Variance explained
+unsupervised_run$betweenss / # between sum of squares
+  unsupervised_run$totss # total sum of squares
+```
+
+All of these values would be used to compared with the values from if we had 3 clusters later.
+
+```{r}
+# Let's visualize
+fviz_cluster(
+  object = unsupervised_run,
+  data = epl_numeric
+)
+```
+
+The visualization shows that there is a meaningful separation between the two clusters even though there are some overlap.
+
+# Now, let's go with 3 clusters
+```{r}
+# Set seed
+set.seed(1234)
+
+# Perform k-means with 5 clusters
+unsupervised_run_2 <- kmeans(
+  x = epl_numeric,
+  centers = 3,
+  iter.max = 10,
+  nstart = 25
+)
+
+# Within-cluster sum of squares
+unsupervised_run_2$withinss
+
+# Variance explained
+unsupervised_run_2$betweenss / # between sum of squares
+  unsupervised_run_2$totss # total sum of squares
+```
+
+
+```{r}
+# Let's visualize
+fviz_cluster(
+  object = unsupervised_run_2,
+  data = epl_numeric
+)
+```
+
+The visualization with 3 clusters also shows meaningful separation with some overlap.
+
+# Now let's calulate ARI
+
+```{r}
+# Calculate ARI
+adjustedRandIndex(unsupervised_run$cluster, unsupervised_run_2$cluster)
+```
+
+The value of 0.47 indicates a moderate similarity between the two clustering solutions.
+
+# Discussion regarding dimension reduction
+
+Based on the similar good separation shown in the plot, but higher variance explained for the clustering solution with 3 clusters, shows that 3 clusters is likely to be better than the solution with 2 clusters. Overall we can say that the statistics of a player such as number of goals scored, number of minutes played, number of matches played and number of passes cluster into meaningful groups.
+
+
+## Modeling
+```{r}
+epl_complete_$cluster <- unsupervised_run_2$cluster
+
+logistic_model <- glm(str_or_no ~ cluster, data = epl_complete_, family = "binomial")
+
+summary(logistic_model)
+```
+
+Based on the result above, the coefficient tells us that when cluster increases by 1, the log odds of the player being of striker/midfielder decreases by 0.3031.
+
+# Model Selection
+Unfortunately we cannot use the VIF or LASSO to check for multicollinearity as we only have one predictor variable. Including the same variables that were used to create the clusters as additional predictors in the logistic regression model could potentially introduce multicollinearity issues and make the interpretation of the coefficients more complex.
+
+#REMOVING NON SIGNIFICANT PREDICTORS
+```{r}
+summary(logistic_model)
+```
+Based on the z-value and p-value, there does not seem to be concern about having a non-significant predictor, which is only our cluster, which is good.
+
+#CROSS VALIDATION
+```{r}
+# Define the control using a cross-validation method
+train_control <- trainControl(method="cv", number=10)
+
+# Train the model
+model <- train(factor(str_or_no) ~ cluster, data=epl_complete_, method="glm", trControl=train_control)
+
+summary(model)
+```
+
+We get similar results as when we did the regression without the cross validation.
+
+#Calculate the Odds-ratio for interpreting the coefficients
+```{r}
+exp(coef(logistic_model))
+```
+
+We converted the above coefficients into odds ratios in order to interpret them in a different way. Based on the results above, if the cluster increases by 1, then the odds of the player being of striker/midfielder decrease by a factor of 0.7385505.In other words, if the number of matches played by a player, the number of minutes played by a player, the number of goals scored by a player, and the number of passes made by a player increases by 1, then the odds of the player being of striker/midfielder decreases by a factor of 0.7385505.
+
+## EVALUATING CLASSIFICATION
+
+#OBTAIN PROBABILITIES
+```{r}
+probs <- predict(logistic_model, type = "response")
+```
+
+#CONVERT PROBABILITIES INTO CLASSES
+```{r}
+classes <- factor(ifelse(probs > 0.35, 1, 0))
+
+classes <- factor(classes, levels = levels(factor(epl_complete_$str_or_no)))
+```
+
+Above, after getting the probabilities, we converted them into classes, with 1 being in the striker/midfielder position and 0 being in the non-striker/midfielder position. We used the threshold of 0.35 by looking at the confusion matrix based on the accuracy, sensitivity, and specificity. We also made sure that the levels of the classes are the same as the levels of the actual data.
+
+#CONFUSION MATRIX
+```{r}
+library(caret)
+confusionMatrix(classes, factor(epl_complete_$str_or_no))
+```
+
+The results are bad. The ACCURACY is low. Both the specificity and sensitivity are also low.
+
+#MOSAIC PLOT
+```{r}
+mosaic_table <- table(classes,epl_interest$str_or_no)
+
+mosaicplot(mosaic_table, 
+           main = "Confusion Matrix", 
+           xlab = "Predicted", 
+           ylab = "Actual")
+```
+
+The mosaic plot agrees with the result of the confusion matrix as when the actual is 0, the prediction of 1 is pretty large, and same for the other way.
+
+
+## DISCUSSION
+
+To summarize all the steps above. First, we wrangled the data, then visualization to see the relationship of our independent variables by outcome. After doing k means we found 3 to be the optimal number of clusters and regressed that cluster on a variable that says whether a player is a striker/midfielder or not. Despite the results we got for our regression, we can't be sure of our results as the model isn't great.
+
+Based on the results above, the accuracy is 0.5658, which means we are barely making accurate predictions. Also, as explained above, the sensitivity is low. Hence, we aren't sure of our logistic regression model results that relate the predictors with the predicted variable and we can't answer the question that aims at addressing if variables such as the number of matches played by a player, number of minutes played by a player, number of goals scored by a player and number of passes made by a player can predict the striker/midfielder position of the player. However, we can say that the statistics of a player such as the number of goals scored, number of minutes played, number of matches played and number of passes made do cluster into meaningful groups based on our dimension reduction. More balanced data where there are more strikers/midfielders may be helpful in improving the accuracy of the model. For that, we could use not just the premier league but also other leagues to increase the sample size and sample from the entire population. This way we could answer if the statistics of a player such as the number of goals scored, number of minutes played, number of matches played and number of passes made cluster to predict the striker/midfielder position of the player.
